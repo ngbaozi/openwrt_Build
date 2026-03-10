@@ -1,148 +1,104 @@
-name: Compile OpenWrt
+name: Build OpenWrt-lean (With Custom Plugins)
 
 on:
-  workflow_dispatch:
-    inputs:
-      upload_firmware:
-        description: 'Upload Firmware'
-        required: true
-        default: 'true'
-        type: boolean
+  workflow_dispatch:  # 手动触发
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-openwrt.yml'
 
-env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  CONFIG_FILE: .config
-  DIY_SCRIPT: diy.sh
-  CACHE_DIR: ~/cache
-  FIRMWARE_TAG: OpenWrt_lede_$(date +%Y%m%d%H%M)
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-      actions: write
-
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Check Server Configuration
-      run: |
-        echo "警告⚠️：请确保 GitHub Actions 有足够的存储空间"
-        echo "CPU 核心数：$(nproc)"
-        echo "内存容量：$(free -h | awk '/^Mem:/{print $2}')"
-        echo "磁盘容量：$(df -h / | tail -1 | awk '{print $2, $4}')"
-        df -h
+      - name: Install Dependencies
+        run: |
+          sudo apt update -y
+          sudo apt full-upgrade -y
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+          libssl-dev libtool llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 \
+          python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
+          uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo apt autoremove -y
+          sudo apt clean -y
 
-    - name: Initialization Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        docker image prune -f
-        sudo -E rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
-        sudo -E apt-mark hold grub-efi-amd64-signed
-        sudo -E apt update
-        sudo -E apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* dotnet* powershell* openjdk* mysql* php* mongodb* dotnet* snap*
-        sudo -E apt -y full-upgrade
-        sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-        sudo -E systemctl daemon-reload
-        sudo -E apt -y autoremove --purge
-        sudo -E apt clean
-        sudo -E timedatectl set-timezone "Asia/Shanghai"
+      - name: Clone Lean's OpenWrt Source
+        run: |
+          git clone --depth=1 https://github.com/coolsnowwolf/lede openwrt
+          cd openwrt
 
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+      - name: Add Custom Feeds (kenzo/small/Lienol)
+        run: |
+          cd openwrt
+          echo 'src-git kenzo https://github.com/kenzok8/openwrt-packages' >> feeds.conf.default
+          echo 'src-git small https://github.com/kenzok8/small' >> feeds.conf.default
+          echo 'src-git Lienol https://github.com/Lienol/openwrt-package' >> feeds.conf.default
 
-    - name: Clone Source Code
-      working-directory: /workdir
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+      - name: Update & Install Feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    - name: Load Custom Configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_SCRIPT
-        cd openwrt
-        bash ../$DIY_SCRIPT
+      - name: Load Default Config & Enable Custom Plugins
+        run: |
+          cd openwrt
+          # 生成默认配置
+          make defconfig
+          # 启用指定插件/主题（通过配置文件追加）
+          cat >> .config <<EOF
+          # 科学上网类
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-ssr-plus=y
+          # 广告拦截/网络过滤
+          CONFIG_PACKAGE_luci-app-adguardhome=y
+          CONFIG_PACKAGE_luci-app-mosdns=y
+          CONFIG_PACKAGE_luci-app-adbyby-plus=y
+          # 网络加速/优化
+          CONFIG_PACKAGE_luci-app-turboacc=y
+          CONFIG_PACKAGE_luci-app-broadbandacc=y
+          CONFIG_PACKAGE_luci-app-fastnet=y
+          CONFIG_PACKAGE_luci-app-uugamebooster=y
+          # 多线/拨号
+          CONFIG_PACKAGE_luci-app-mwan3=y
+          CONFIG_PACKAGE_luci-app-syncdial=y
+          CONFIG_PACKAGE_luci-app-ap-modem=y
+          # 文件管理/共享
+          CONFIG_PACKAGE_luci-app-filebrowser=y
+          CONFIG_PACKAGE_luci-app-samba4=y
+          # 其他工具
+          CONFIG_PACKAGE_luci-app-openlist2=y
+          CONFIG_PACKAGE_luci-app-unblockneteasemusic=y
+          # 主题
+          CONFIG_PACKAGE_luci-theme-argon=y
+          EOF
+          # 自动补全配置依赖
+          make defconfig
 
-    - name: Download Feeds
-      working-directory: openwrt
-      run: |
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      - name: Download Dependencies
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
 
-    - name: Load Custom Configuration (Post-Feeds)
-      working-directory: openwrt
-      run: |
-        [ -e files ] && mv files ./files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE ./.config
-        make defconfig
+      - name: Compile OpenWrt Firmware
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s || make -j1 V=s
 
-    - name: Download Packages
-      working-directory: openwrt
-      run: |
-        make download -j8
-        find dl -size -1024c -exec rm -f {} \;
-
-    - name: Compile Packages
-      id: compile
-      working-directory: openwrt
-      run: |
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Generate Firmware
-      if: steps.compile.outputs.status == 'success'
-      id: generate
-      working-directory: openwrt
-      run: |
-        cd bin/targets/*/*
-        cat sha256sums
-        cp $GITHUB_WORKSPACE/openwrt/bin/targets/*/*/*rootfs.tar.gz $GITHUB_WORKSPACE/openwrt/openwrt-rootfs.tar.gz
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Organize Files
-      if: steps.generate.outputs.status == 'success'
-      id: organize
-      run: |
-        mkdir -p firmware
-        cp $FIRMWARE/*.manifest firmware/
-        cp $FIRMWARE/*.buildinfo firmware/
-        cp $FIRMWARE/*.sha256sum firmware/
-        cp $FIRMWARE/*.tar.gz firmware/
-        cd firmware
-        sha256sum * > sha256sums
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload Firmware
-      if: steps.organize.outputs.status == 'success' && inputs.upload_firmware == 'true'
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ env.FIRMWARE_TAG }}
-        files: ${{ env.FIRMWARE }}/*
-        body: |
-          ## OpenWrt LEDE Firmware
-          - 编译时间：${{ github.event.head_commit.timestamp }}
-          - 源码来源：${{ env.REPO_URL }}
-          - 默认 IP: 192.168.1.253
-          - 默认密码：password
-
-    - name: Delete Workflow Runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 6
-
-    - name: Delete Releases
-      uses: softprops/action-gh-release@v1
-      if: inputs.upload_firmware == 'true'
-      with:
-        tag_name: ${{ env.FIRMWARE_TAG }}
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt-Firmware-Custom
+          path: openwrt/bin/targets/
+          retention-days: 30
