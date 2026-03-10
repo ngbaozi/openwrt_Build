@@ -1,0 +1,143 @@
+name: Compile OpenWrt
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_firmware:
+        description: 'Upload Firmware'
+        required: true
+        default: 'true'
+        type: boolean
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_FILE: .config
+  DIY_SCRIPT: diy.sh
+  CACHE_DIR: ~/cache
+  FIRMWARE_TAG: OpenWrt_lede_$(date +%Y%m%d%H%M)
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Check Server Configuration
+      run: |
+        echo "警告⚠️：请确保 GitHub Actions 有足够的存储空间"
+        echo "CPU 核心数：$(nproc)"
+        echo "内存容量：$(free -h | awk '/^Mem:/{print $2}')"
+        echo "磁盘容量：$(df -h / | tail -1 | awk '{print $2, $4}')"
+        df -h
+
+    - name: Initialization Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y $(curl -fsSL https://raw.githubusercontent.com/coolsnowwolf/lede/master/scripts/initial-installation)
+        sudo -E apt-get -qq install -y $(curl -fsSL https://raw.githubusercontent.com/coolsnowwolf/lede/master/scripts/essential-installation)
+        sudo -E apt-get -qq install -y rename libfuse2 pigz aria2 jq
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone Source Code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load Custom Configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_SCRIPT
+        cd openwrt
+        bash ../$DIY_SCRIPT
+
+    - name: Download Feeds
+      working-directory: openwrt
+      run: |
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load Custom Configuration (Post-Feeds)
+      working-directory: openwrt
+      run: |
+        [ -e files ] && mv files ./files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE ./.config
+        make defconfig
+
+    - name: Download Packages
+      working-directory: openwrt
+      run: |
+        make download -j8
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Packages
+      id: compile
+      working-directory: openwrt
+      run: |
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Generate Firmware
+      if: steps.compile.outputs.status == 'success'
+      id: generate
+      working-directory: openwrt
+      run: |
+        cd bin/targets/*/*
+        cat sha256sums
+        cp $GITHUB_WORKSPACE/openwrt/bin/targets/*/*/*rootfs.tar.gz $GITHUB_WORKSPACE/openwrt/openwrt-rootfs.tar.gz
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Organize Files
+      if: steps.generate.outputs.status == 'success'
+      id: organize
+      run: |
+        mkdir -p firmware
+        cp $FIRMWARE/*.manifest firmware/
+        cp $FIRMWARE/*.buildinfo firmware/
+        cp $FIRMWARE/*.sha256sum firmware/
+        cp $FIRMWARE/*.tar.gz firmware/
+        cd firmware
+        sha256sum * > sha256sums
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload Firmware
+      if: steps.organize.outputs.status == 'success' && inputs.upload_firmware == 'true'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ env.FIRMWARE_TAG }}
+        files: ${{ env.FIRMWARE }}/*
+        body: |
+          ## OpenWrt LEDE Firmware
+          - 编译时间：${{ github.event.head_commit.timestamp }}
+          - 源码来源：${{ env.REPO_URL }}
+          - 默认 IP: 192.168.1.253
+          - 默认密码：password
+
+    - name: Delete Workflow Runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 6
+
+    - name: Delete Releases
+      uses: softprops/action-gh-release@v1
+      if: inputs.upload_firmware == 'true'
+      with:
+        tag_name: ${{ env.FIRMWARE_TAG }}
